@@ -140,17 +140,19 @@ sema_up (struct semaphore *sema)
   old_level = intr_disable ();
   if (!list_empty (&sema->waiters)) 
     {
-      /*
-       * This is the critical line.
-       * list_pop_front() REMOVES the thread from sema->waiters.
-       * thread_unblock() then safely adds it to ready_list.
-       */
-      thread_unblock (list_entry (list_pop_front (&sema->waiters),
-                                  struct thread, elem));
+      list_sort(&sema->waiters, thread_priority_cmp_greater, NULL);
+      struct thread *t = list_entry(list_pop_front(&sema->waiters),
+                                    struct thread, elem);
+      thread_unblock(t);
     }
   sema->value++;
   intr_set_level (old_level);
+
+  /* Check if the newly unblocked thread should preempt. */
+  thread_yield_if_not_highest_priority();
 }
+
+
 static void sema_test_helper (void *sema_);
 
 /* Self-test for semaphores that makes control "ping-pong"
@@ -293,20 +295,19 @@ lock_release (struct lock *lock)
 
   struct thread *cur = thread_current ();
 
-  /* --- MODIFICATION --- */
   if (!thread_mlfqs)
     {
-      /* Remove lock from this thread's locks_held list. */
       list_remove (&lock->elem);
-      
-      /* Recalculate priority, as we may have lost a donation. */
       thread_recalculate_priority (cur);
     }
-  /* --- END MODIFICATION --- */
 
   lock->holder = NULL;
   sema_up (&lock->semaphore);
+
+  /* Check if we should yield now. */
+  thread_yield_if_not_highest_priority();
 }
+
 /* Returns true if the current thread holds LOCK, false
    otherwise.  (Note that testing whether some other thread holds
    a lock would be racy.) */
@@ -391,8 +392,12 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED)
   ASSERT (lock_held_by_current_thread (lock));
 
   if (!list_empty (&cond->waiters)) 
-    sema_up (&list_entry (list_pop_front (&cond->waiters),
-                          struct semaphore_elem, elem)->semaphore);
+    {
+      list_sort(&cond->waiters, sema_elem_priority_cmp_greater, NULL);
+      struct semaphore_elem *se = list_entry(list_pop_front(&cond->waiters),
+                                             struct semaphore_elem, elem);
+      sema_up(&se->semaphore);
+    }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by

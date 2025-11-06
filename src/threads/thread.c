@@ -228,6 +228,8 @@ thread_priority_cmp_greater (const struct list_elem *a,
 {
   const struct thread *ta = list_entry (a, struct thread, elem);
   const struct thread *tb = list_entry (b, struct thread, elem);
+  
+  /* This MUST be a "greater than" symbol > */
   return ta->priority > tb->priority;
 }
 /* Puts the current thread to sleep.  It will not be scheduled
@@ -272,12 +274,15 @@ thread_check_preemption (void)
    be important: if the caller had disabled interrupts itself,
    it may expect that it can atomically unblock a thread and
    update other data. */
+/* threads/thread.c */
 void
 thread_unblock (struct thread *t) 
 {
   enum intr_level old_level = intr_disable ();
-  ASSERT (t->status == THREAD_BLOCKED);
   
+  ASSERT (t->status == THREAD_BLOCKED);
+
+  /* Use list_insert_ordered to keep ready_list sorted */
   if (thread_mlfqs)
     list_push_back (&ready_list, &t->elem);
   else
@@ -286,16 +291,17 @@ thread_unblock (struct thread *t)
 
   t->status = THREAD_READY;
 
+  /* --- THIS IS THE CRITICAL PREEMPTION CHECK --- */
   /*
-   * The preemption check must happen *after* the thread is
-   * unblocked and its status is set to READY.
+   * If we are not in an interrupt context, and the thread we just
+   * unblocked has a higher priority than the current thread,
+   * then yield the CPU.
    */
-  if (!thread_mlfqs && !intr_context () && 
-      thread_current () != idle_thread && /* Good safety check */
-      t->priority > thread_current ()->priority)
+  if (!thread_mlfqs && !intr_context () && t->priority > thread_current ()->priority)
     {
       thread_yield ();
     }
+  /* --- END CHECK --- */
   
   intr_set_level (old_level);
 }
@@ -355,6 +361,7 @@ thread_exit (void)
 
 /* Yields the CPU.  The current thread is not put to sleep and
    may be scheduled again immediately at the scheduler's whim. */
+/* threads/thread.c */
 void
 thread_yield (void) 
 {
@@ -374,7 +381,6 @@ thread_yield (void)
   schedule ();
   intr_set_level (old_level);
 }
-
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -413,7 +419,7 @@ thread_donate_priority (struct thread *target, int new_priority, int depth)
       thread_donate_priority (target->waiting_on_lock->holder,
                               new_priority, depth + 1);
     }
-
+  list_sort(&ready_list, thread_priority_cmp_greater, NULL);  
   intr_set_level (old_level);
 }
 /* We will need this helper function*/
@@ -516,6 +522,26 @@ thread_get_recent_cpu (void)
   return 0;
 }
 
+/* Called after unblocking or releasing a thread to check
+   whether the current thread should yield. */
+void
+thread_yield_if_not_highest_priority(void)
+{
+  if (intr_context())
+    return;
+
+  enum intr_level old_level = intr_disable();
+
+  if (!list_empty(&ready_list))
+    {
+      struct thread *highest = list_entry(list_front(&ready_list),
+                                          struct thread, elem);
+      if (highest->priority > thread_current()->priority)
+        thread_yield();
+    }
+
+  intr_set_level(old_level);
+}
 
 /* Idle thread.  Executes when no other thread is ready to run.
 
