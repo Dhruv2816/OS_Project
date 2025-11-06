@@ -98,6 +98,7 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  list_push_back (&all_list, &initial_thread->allelem);
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -162,6 +163,7 @@ thread_print_stats (void)
    The code provided sets the new thread's `priority' member to
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
+/* threads/thread.c */
 tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux) 
@@ -183,6 +185,11 @@ thread_create (const char *name, int priority,
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
 
+  /* --- THIS IS THE FIX --- */
+  /* Add thread to all threads list. */
+  list_push_back (&all_list, &t->allelem);
+  /* --- END OF FIX --- */
+
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
   kf->eip = NULL;
@@ -201,9 +208,28 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
+  /* ----------------------------------------------------------------- */
+  /* --- NEW CODE FOR PREEMPTION --- */
+  /* If the new thread has higher priority, yield the CPU. */
+  if (!thread_mlfqs && t->priority > thread_current ()->priority)
+  {
+    thread_yield ();
+  }
+  /* ----------------------------------------------------------------- */
+
   return tid;
 }
-
+/* Comparison function for sorting threads by priority in descending order.
+   Returns true if thread 'a' has a higher priority than thread 'b'. */
+bool
+thread_priority_cmp_greater (const struct list_elem *a,
+                             const struct list_elem *b,
+                             void *aux UNUSED)
+{
+  const struct thread *ta = list_entry (a, struct thread, elem);
+  const struct thread *tb = list_entry (b, struct thread, elem);
+  return ta->priority > tb->priority;
+}
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
 
@@ -219,7 +245,25 @@ thread_block (void)
   thread_current ()->status = THREAD_BLOCKED;
   schedule ();
 }
+/* Checks if the current thread has the highest priority.
+   If not, yields the CPU. Assumes interrupts are disabled. */
+void
+thread_check_preemption (void)
+{
+  /* If the ready list is empty, there's nothing to preempt with. */
+  if (list_empty (&ready_list))
+    return;
 
+  /* Get the highest-priority thread from the ready list. */
+  struct thread *next_thread = list_entry (list_front (&ready_list),
+                                           struct thread, elem);
+
+  /* Compare priorities and yield if necessary. */
+  if (thread_current ()->priority < next_thread->priority)
+    {
+      thread_yield ();
+    }
+}
 /* Transitions a blocked thread T to the ready-to-run state.
    This is an error if T is not blocked.  (Use thread_yield() to
    make the running thread ready.)
@@ -231,17 +275,30 @@ thread_block (void)
 void
 thread_unblock (struct thread *t) 
 {
-  enum intr_level old_level;
-
-  ASSERT (is_thread (t));
-
-  old_level = intr_disable ();
+  enum intr_level old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  
+  if (thread_mlfqs)
+    list_push_back (&ready_list, &t->elem);
+  else
+    list_insert_ordered (&ready_list, &t->elem,
+                         thread_priority_cmp_greater, NULL);
+
   t->status = THREAD_READY;
+
+  /*
+   * The preemption check must happen *after* the thread is
+   * unblocked and its status is set to READY.
+   */
+  if (!thread_mlfqs && !intr_context () && 
+      thread_current () != idle_thread && /* Good safety check */
+      t->priority > thread_current ()->priority)
+    {
+      thread_yield ();
+    }
+  
   intr_set_level (old_level);
 }
-
 /* Returns the name of the running thread. */
 const char *
 thread_name (void) 
@@ -302,13 +359,17 @@ void
 thread_yield (void) 
 {
   struct thread *cur = thread_current ();
-  enum intr_level old_level;
-  
-  ASSERT (!intr_context ());
+  enum intr_level old_level = intr_disable ();
 
-  old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    {
+      if (thread_mlfqs)
+        list_push_back (&ready_list, &cur->elem);
+      else
+        list_insert_ordered (&ready_list, &cur->elem,
+                             thread_priority_cmp_greater, NULL);
+    }
+  
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -330,14 +391,93 @@ thread_foreach (thread_action_func *func, void *aux)
       func (t, aux);
     }
 }
+/* We limit nesting to 8 levels as suggested. */
+#define MAX_DONATION_DEPTH 8
+
+void
+thread_donate_priority (struct thread *target, int new_priority, int depth)
+{
+  enum intr_level old_level = intr_disable ();
+
+  if (depth >= MAX_DONATION_DEPTH || target->priority >= new_priority)
+    {
+      intr_set_level (old_level);
+      return;
+    }
+
+  target->priority = new_priority;
+
+  /* Propagate the donation recursively */
+  if (target->waiting_on_lock != NULL)
+    {
+      thread_donate_priority (target->waiting_on_lock->holder,
+                              new_priority, depth + 1);
+    }
+
+  intr_set_level (old_level);
+}
+/* We will need this helper function*/
+void
+thread_recalculate_priority (struct thread *t)
+{
+  enum intr_level old_level = intr_disable ();
+
+  int new_priority = t->base_priority;
+
+  /* Find the highest priority of any thread waiting on a lock held by t */
+  if (!list_empty (&t->locks_held))
+    {
+      struct list_elem *e;
+      for (e = list_begin (&t->locks_held); e != list_end (&t->locks_held); 
+           e = list_next (e))
+        {
+          struct lock *l = list_entry (e, struct lock, elem);
+          if (!list_empty (&l->semaphore.waiters))
+            {
+              /* The waiters list is priority-sorted, so front is highest */
+              struct thread *waiter = list_entry (list_front (&l->semaphore.waiters),
+                                                  struct thread, elem);
+              if (waiter->priority > new_priority)
+                {
+                  new_priority = waiter->priority;
+                }
+            }
+        }
+    }
+
+  t->priority = new_priority;
+  intr_set_level (old_level);
+}
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
-}
+  if (thread_mlfqs) /* ADD THIS */
+    return;         /* ADD THIS */
 
+  enum intr_level old_level = intr_disable ();
+
+  struct thread *cur = thread_current ();
+  cur->base_priority = new_priority;
+
+  /* Recalculate effective priority. 
+     It will be max(new_priority, highest_donation_from_locks_held). */
+  thread_recalculate_priority (cur);
+
+  /* Check if we must yield to a thread in the ready list */
+  if (!list_empty (&ready_list))
+    {
+      struct thread *next_thread = list_entry (list_front (&ready_list),
+                                               struct thread, elem);
+      if (cur->priority < next_thread->priority)
+        {
+          thread_yield ();
+        }
+    }
+
+  intr_set_level (old_level);
+}
 /* Returns the current thread's priority. */
 int
 thread_get_priority (void) 
@@ -376,6 +516,7 @@ thread_get_recent_cpu (void)
   return 0;
 }
 
+
 /* Idle thread.  Executes when no other thread is ready to run.
 
    The idle thread is initially put on the ready list by
@@ -448,11 +589,10 @@ is_thread (struct thread *t)
 
 /* Does basic initialization of T as a blocked thread named
    NAME. */
+/* threads/thread.c */
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
-  enum intr_level old_level;
-
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
@@ -461,14 +601,18 @@ init_thread (struct thread *t, const char *name, int priority)
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
+  
+  /* --- PASTE THE LOGIC HERE --- */
+  t->base_priority = priority;
   t->priority = priority;
+  list_init (&t->locks_held);
+  t->waiting_on_lock = NULL;
+  /* --- END PASTE --- */
+
   t->magic = THREAD_MAGIC;
 
-  old_level = intr_disable ();
-  list_push_back (&all_list, &t->allelem);
-  intr_set_level (old_level);
+  /* Make sure the old, buggy list_push_back is GONE from here */
 }
-
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
    returns a pointer to the frame's base. */
 static void *
