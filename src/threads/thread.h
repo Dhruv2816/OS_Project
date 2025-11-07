@@ -94,7 +94,11 @@ struct thread
     struct lock *waiting_on_lock; /* Lock this thread is waiting for (if any). */
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
+       /* Locks this thread is holding */
+    struct lock *wait_on_lock;    /* Lock this thread is waiting on */
 
+    struct list_elem donation_elem; 
+    struct list donations;  
      /* List element. */
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -109,7 +113,12 @@ struct thread
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
-
+struct donation {
+  struct list_elem elem;    /* link in holder->donations list */
+  struct thread *donor;     /* thread that donated */
+  struct lock *lock;        /* lock that caused donation */
+  int priority;             /* snapshot of donor's priority */
+};
 void thread_init (void);
 void thread_start (void);
 void thread_yield_if_not_highest_priority(void);
@@ -121,7 +130,7 @@ bool thread_priority_cmp_greater (const struct list_elem *a,
                                   void *aux UNUSED);
 typedef void thread_func (void *aux);
 tid_t thread_create (const char *name, int priority, thread_func *, void *);
-void thread_donate_priority (struct thread *target, int new_priority, int depth);
+void thread_donate_priority(struct thread *t);
 void thread_recalculate_priority (struct thread *t);
 void thread_block (void);
 void thread_unblock (struct thread *);

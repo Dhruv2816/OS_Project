@@ -40,6 +40,7 @@
 
    - up or "V": increment the value (and wake up one waiting
      thread, if any). */
+void debug_check_list_threads(const struct list *list, const char *tag);
 void
 sema_init (struct semaphore *sema, unsigned value) 
 {
@@ -65,22 +66,32 @@ sema_down (struct semaphore *sema)
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
+
   while (sema->value == 0) 
     {
-      /* OLD:
-      list_push_back (&sema->waiters, &thread_current ()->elem); 
-      */
-
-      /* NEW: Insert the thread into the waiters list
-         in descending priority order. */
-      list_insert_ordered (&sema->waiters, &thread_current ()->elem,
+      debug_check_list_threads(&sema->waiters, "sema->waiters (after insert)");
+      /* Insert current thread into waiters ordered by priority. */
+      list_insert_ordered (&sema->waiters, &thread_current()->elem,
                            thread_priority_cmp_greater, NULL);
-      
+
+      /* Debug: print waiter list contents (priorities) */
+      {
+        struct list_elem *e;
+        printf("[SEMA DOWN] sema %p waiters:", (void*)sema);
+        for (e = list_begin(&sema->waiters); e != list_end(&sema->waiters); e = list_next(e))
+          {
+            struct thread *tt = list_entry(e, struct thread, elem);
+            printf(" %s(%d)", tt->name, tt->priority);
+          }
+        printf("\n");
+      }
+
       thread_block ();
     }
   sema->value--;
   intr_set_level (old_level);
 }
+
 /* One semaphore in a list. */
 struct semaphore_elem 
   {
@@ -129,7 +140,6 @@ sema_elem_priority_cmp_greater (const struct list_elem *a,
    and wakes up one thread of those waiting for SEMA, if any.
 
    This function may be called from an interrupt handler. */
-
 void
 sema_up (struct semaphore *sema) 
 {
@@ -138,19 +148,32 @@ sema_up (struct semaphore *sema)
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
-  if (!list_empty (&sema->waiters)) 
+
+  if (!list_empty (&sema->waiters))
     {
-      list_sort(&sema->waiters, thread_priority_cmp_greater, NULL);
-      struct thread *t = list_entry(list_pop_front(&sema->waiters),
-                                    struct thread, elem);
-      thread_unblock(t);
+      /* Ensure waiters are sorted by priority, highest first. */
+      list_sort (&sema->waiters, thread_priority_cmp_greater, NULL);
+
+      struct thread *t = list_entry (list_pop_front (&sema->waiters),
+                                     struct thread, elem);
+
+      printf ("[SEMA UP] unblocking %s (pri %d) from sema %p\n",
+              t->name, t->priority, (void*)sema);
+      printf("[SEMA UP DEBUG] waking %s (pri=%d) t=%p magic=0x%x\n",
+       t->name, t->priority, t, t->magic);
+
+      thread_unblock (t);
     }
+
   sema->value++;
+  printf ("[SEMA UP] sema %p value now %d\n", (void*)sema, sema->value);
   intr_set_level (old_level);
 
-  /* Check if the newly unblocked thread should preempt. */
-  thread_yield_if_not_highest_priority();
+  /* If the unblocked thread has higher priority, yield. */
+  if (!intr_context ())
+    thread_yield_if_not_highest_priority ();
 }
+
 
 
 static void sema_test_helper (void *sema_);
@@ -224,43 +247,36 @@ lock_init (struct lock *lock)
    interrupts disabled, but interrupts will be turned back on if
    we need to sleep. */
 void
-lock_acquire (struct lock *lock)
+lock_acquire(struct lock *lock)
 {
-  ASSERT (lock != NULL);
-  ASSERT (!intr_context ());
-  ASSERT (!lock_held_by_current_thread (lock));
+  ASSERT(lock != NULL);
+  ASSERT(!intr_context());
+  ASSERT(!lock_held_by_current_thread(lock));
 
-  struct thread *cur = thread_current ();
-
-  /* --- MODIFICATION --- */
-  /* Only do donation logic if NOT in mlfqs mode. */
-  if (lock->holder != NULL && !thread_mlfqs) 
+  struct thread *cur = thread_current();
+  printf ("[LOCK ACQ] %s (pri %d) trying to acquire lock %p (holder=%s)\n",
+          thread_current()->name, thread_current()->priority,
+          (void*) lock,
+          lock->holder ? lock->holder->name : "NULL");
+  if (lock->holder != NULL && !thread_mlfqs)
     {
-      cur->waiting_on_lock = lock;
-      thread_donate_priority (lock->holder, cur->priority, 0);
+      cur->wait_on_lock = lock;
+      list_push_back(&lock->holder->donations, &cur->donation_elem);
+      thread_donate_priority(lock->holder);
     }
-  /* --- END MODIFICATION --- */
 
-  sema_down (&lock->semaphore);
+  sema_down(&lock->semaphore);
+  printf ("[LOCK GOT] %s (pri %d) acquired lock %p\n",
+        thread_current()->name, thread_current()->priority, (void*) lock);
 
-  /* --- MODIFICATION --- */
-  /* We just woke up and acquired the lock. */
-  if (!thread_mlfqs && cur->waiting_on_lock == lock)
-    {
-      cur->waiting_on_lock = NULL;
-    }
-  /* --- END MODIFICATION --- */
-
+  cur->wait_on_lock = NULL;
   lock->holder = cur;
 
-  /* --- MODIFICATION --- */
-  /* Only add to locks_held list if NOT in mlfqs mode. */
   if (!thread_mlfqs)
-    {
-      list_push_back (&cur->locks_held, &lock->elem);
-    }
-  /* --- END MODIFICATION --- */
+    list_push_back(&cur->locks_held, &lock->elem);
 }
+
+
 /* Tries to acquires LOCK and returns true if successful or false
    on failure.  The lock must not already be held by the current
    thread.
@@ -288,25 +304,46 @@ lock_try_acquire (struct lock *lock)
    handler. */
 /* threads/synch.c */
 void
-lock_release (struct lock *lock) 
+lock_release (struct lock *lock)
 {
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
   struct thread *cur = thread_current ();
 
+  printf ("[LOCK REL] %s releasing lock %p\n",
+          cur->name, (void *) lock);
+
   if (!thread_mlfqs)
     {
-      list_remove (&lock->elem);
+      /* Remove all donations that were waiting on this lock. */
+      struct list_elem *e = list_begin (&cur->donations);
+      while (e != list_end (&cur->donations))
+        {
+          struct list_elem *next = list_next (e);
+          struct thread *t = list_entry (e, struct thread, donation_elem);
+
+          if (t->wait_on_lock == lock)
+            {
+              printf ("[LOCK REL] removing donation from %s (pri %d)\n",
+                      t->name, t->priority);
+              list_remove (e);  /* SAFE: we already saved next */
+            }
+
+          e = next;  /* move to next element */
+        }
+
+      /* Recalculate priority after donation removal. */
+      printf ("[LOCK REL] recalculating priority for %s\n", cur->name);
       thread_recalculate_priority (cur);
     }
 
+  /* Clear the lock holder and release the semaphore. */
   lock->holder = NULL;
+  printf ("[LOCK REL] performing sema_up on %p\n", (void *) lock);
   sema_up (&lock->semaphore);
-
-  /* Check if we should yield now. */
-  thread_yield_if_not_highest_priority();
 }
+
 
 /* Returns true if the current thread holds LOCK, false
    otherwise.  (Note that testing whether some other thread holds

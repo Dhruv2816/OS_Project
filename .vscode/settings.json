@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "thread.h": "c",
-        "random": "c"
+        "random": "c",
+        "stdlib.h": "c"
     }
 }
