@@ -90,7 +90,11 @@ main (void)
      then enable console locking. */
   thread_init ();
   console_init ();  
-
+  if (thread_mlfqs)
+    {
+      /* This initializes MLFQ variables *after* the flag is set */
+      thread_mlfqs_init ();
+    }
   /* Greet user. */
   printf ("Pintos booting with %'"PRIu32" kB RAM...\n",
           init_ram_pages * PGSIZE / 1024);

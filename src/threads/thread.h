@@ -96,7 +96,9 @@ struct thread
     struct list_elem elem;              /* List element. */
        /* Locks this thread is holding */
     struct lock *wait_on_lock;    /* Lock this thread is waiting on */
-
+    /* --- MLFQS --- */
+    int nice;           /* Nice value for MLFQ scheduler */
+    int recent_cpu;     /* recent_cpu value, in fixed-point */
     struct list_elem donation_elem; 
     struct list donations;  
      /* List element. */
@@ -121,6 +123,7 @@ struct donation {
 };
 void thread_init (void);
 void thread_start (void);
+void thread_mlfqs_init (void);
 void thread_yield_if_not_highest_priority(void);
 
 void thread_tick (void);

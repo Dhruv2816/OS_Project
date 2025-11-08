@@ -2,6 +2,7 @@
     "files.associations": {
         "thread.h": "c",
         "random": "c",
-        "stdlib.h": "c"
+        "stdlib.h": "c",
+        "functional": "c"
     }
 }
