@@ -97,17 +97,17 @@ debug_check_list_threads(const struct list *list, const char *tag)
       t = list_entry(e, struct thread, elem);
       if (!is_thread(t))
         {
-          printf("[BUG DETECT] %s: bad list_elem %p not a thread (name ptr maybe %p)\n",
-                 tag, e, (void *) t);
+          // printf("[BUG DETECT] %s: bad list_elem %p not a thread (name ptr maybe %p)\n",
+                //  tag, e, (void *) t);
           /* Print some raw memory to help diagnose */
           uint32_t *p = (uint32_t *) pg_round_down((uint32_t) e);
-          printf("[BUG DETECT] page start %p first 8 words: %08x %08x %08x %08x %08x %08x %08x %08x\n",
-                 (void*)p, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+          // printf("[BUG DETECT] page start %p first 8 words: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+          //        (void*)p, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
           return;
         }
     }
   /* nothing suspicious */
-  printf("[LIST OK] %s all entries are thread objects\n", tag);
+  // printf("[LIST OK] %s all entries are thread objects\n", tag);
 }
 void
 thread_init (void) 
@@ -138,13 +138,13 @@ thread_start (void)
 
   {
     struct list_elem *e;
-    printf("[ALL THREADS] listing all threads at startup:");
+    // printf("[ALL THREADS] listing all threads at startup:");
     for (e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e))
       {
         struct thread *tt = list_entry(e, struct thread, allelem);
-        printf(" %s(tid=%d,pri=%d)", tt->name, tt->tid, tt->priority);
+        // printf(" %s(tid=%d,pri=%d)", tt->name, tt->tid, tt->priority);
       }
-    printf("\n");
+    // printf("\n");
   }
   thread_create ("idle", PRI_MIN, idle, &idle_started);
 
@@ -181,8 +181,8 @@ thread_tick (void)
 void
 thread_print_stats (void) 
 {
-  printf ("Thread: %lld idle ticks, %lld kernel ticks, %lld user ticks\n",
-          idle_ticks, kernel_ticks, user_ticks);
+  // printf ("Thread: %lld idle ticks, %lld kernel ticks, %lld user ticks\n",
+  //         idle_ticks, kernel_ticks, user_ticks);
 }
 
 /* Creates a new kernel thread named NAME with the given initial
@@ -205,7 +205,7 @@ tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux) 
 { 
-  printf("[CREATE TRACE] creating thread name=%s pri=%d\n", name, priority);
+  // printf("[CREATE TRACE] creating thread name=%s pri=%d\n", name, priority);
 
   struct thread *t;
   struct kernel_thread_frame *kf;
@@ -219,7 +219,7 @@ thread_create (const char *name, int priority,
   t = palloc_get_page (PAL_ZERO);
   if (t == NULL)
     {
-      printf("[CREATE FAIL] Could not allocate page for thread %s\n", name);
+      // printf("[CREATE FAIL] Could not allocate page for thread %s\n", name);
       return TID_ERROR;
     }
 
@@ -250,14 +250,14 @@ thread_create (const char *name, int priority,
   thread_unblock (t);
 
   /* --- DEBUG PRINT --- */
-  printf("[CREATE] new thread name=%s tid=%d base_pri=%d pri=%d\n",
-         t->name, t->tid, t->base_priority, t->priority);
+  // printf("[CREATE] new thread name=%s tid=%d base_pri=%d pri=%d\n",
+  //        t->name, t->tid, t->base_priority, t->priority);
 
   /* If the new thread is higher priority, yield CPU. */
   if (!thread_mlfqs && t->priority > thread_current()->priority)
     {
-      printf("[CREATE] yielding current thread (%s) to higher-priority %s\n",
-             thread_current()->name, t->name);
+      // printf("[CREATE] yielding current thread (%s) to higher-priority %s\n",
+      //        thread_current()->name, t->name);
       thread_yield();
     }
 
@@ -361,12 +361,12 @@ thread_unblock (struct thread *t)
   if (!list_empty(&ready_list))
     {
       struct thread *top = list_entry(list_front(&ready_list), struct thread, elem);
-      printf("[UNBLOCK] pushed %s (pri %d); top ready is %s (pri %d)\n",
-             t->name, t->priority, top->name, top->priority);
+      // printf("[UNBLOCK] pushed %s (pri %d); top ready is %s (pri %d)\n",
+      //        t->name, t->priority, top->name, top->priority);
     }
   else
-    printf("[UNBLOCK] pushed %s (pri %d); ready_list empty?!\n",
-           t->name, t->priority);
+    // printf("[UNBLOCK] pushed %s (pri %d); ready_list empty?!\n",
+    //        t->name, t->priority);
 
   /* If not in interrupt context, possibly yield immediately. */
   if (!thread_mlfqs && !intr_context () &&
@@ -397,8 +397,8 @@ thread_current (void)
      have overflowed its stack.  Each thread has less than 4 kB
      of stack, so a few big automatic arrays or moderate
      recursion can cause stack overflow. */
-  printf("[BUG TRACE] thread_current called: t=%p, status=%d, magic=0x%x\n",
-    t, t->status, t->magic);
+  // printf("[BUG TRACE] thread_current called: t=%p, status=%d, magic=0x%x\n",
+  //   t, t->status, t->magic);
 
   ASSERT (is_thread (t));
   ASSERT (t->status == THREAD_RUNNING);
@@ -482,25 +482,25 @@ thread_donate_priority (struct thread *t)
   struct thread *cur = thread_current ();
   int depth = 0;
 
-  printf ("[DONATE START] donor=%s (pri %d) -> target=%s (pri %d)\n",
-          cur->name, cur->priority,
-          t->name, t->priority);
+  // printf ("[DONATE START] donor=%s (pri %d) -> target=%s (pri %d)\n",
+  //         cur->name, cur->priority,
+  //         t->name, t->priority);
 
   /* Propagate donation up the chain of locks, limited to 8 levels. */
   while (t && depth < 8)
     {
       if (t->priority < cur->priority)
         {
-          printf ("[DONATE APPLY] %s: %d -> %d (via %s)\n",
-                  t->name, t->priority, cur->priority, cur->name);
+          // printf ("[DONATE APPLY] %s: %d -> %d (via %s)\n",
+          //         t->name, t->priority, cur->priority, cur->name);
           t->priority = cur->priority;
         }
 
       /* If the target itself is waiting on another lock, propagate. */
       if (t->wait_on_lock && t->wait_on_lock->holder)
         {
-          printf ("[DONATE CHAIN] now propagating to %s\n",
-                  t->wait_on_lock->holder->name);
+          // printf ("[DONATE CHAIN] now propagating to %s\n",
+          //         t->wait_on_lock->holder->name);
           t = t->wait_on_lock->holder;
         }
       else
@@ -523,6 +523,9 @@ thread_recalculate_priority(struct thread *t)
 
   if (!list_empty(&t->donations))
     {
+      /* --- FIX: Sort the list to find the highest priority donor --- */
+      list_sort(&t->donations, thread_donation_cmp_greater, NULL);
+      /* --- END FIX --- */
       struct thread *highest =
           list_entry(list_front(&t->donations), struct thread, donation_elem);
       if (highest->priority > t->priority)
@@ -663,9 +666,9 @@ kernel_thread (thread_func *function, void *aux)
   ASSERT (function != NULL);
 
   intr_enable ();       /* The scheduler runs with interrupts off. */
-  printf("[KTHREAD START] %s starting (tid=%d base=%d pri=%d)\n",
-        thread_current()->name, thread_current()->tid,
-        thread_current()->base_priority, thread_current()->priority);
+  // printf("[KTHREAD START] %s starting (tid=%d base=%d pri=%d)\n",
+  //       thread_current()->name, thread_current()->tid,
+  //       thread_current()->base_priority, thread_current()->priority);
   function (aux);       /* Execute the thread function. */
   thread_exit ();       /* If function() returns, kill the thread. */
 }
@@ -807,13 +810,13 @@ schedule (void)
   struct thread *cur = running_thread ();
   {
     struct list_elem *e;
-    printf("[SCHEDULE] ready_list:");
+    // printf("[SCHEDULE] ready_list:");
     for (e = list_begin(&ready_list); e != list_end(&ready_list); e = list_next(e))
       {
         struct thread *tt = list_entry(e, struct thread, elem);
-        printf(" %s(%d)", tt->name, tt->priority);
+        // printf(" %s(%d)", tt->name, tt->priority);
       }
-    printf("\n");
+    // printf("\n");
   }
   debug_check_list_threads(&ready_list, "ready_list (before schedule)");
   struct thread *next = next_thread_to_run ();
