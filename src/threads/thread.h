@@ -97,6 +97,7 @@ struct thread
        /* Locks this thread is holding */
     struct lock *wait_on_lock;    /* Lock this thread is waiting on */
     /* --- MLFQS --- */
+    int64_t wake_up_tick;
     int nice;           /* Nice value for MLFQ scheduler */
     int recent_cpu;     /* recent_cpu value, in fixed-point */
     struct list_elem donation_elem; 

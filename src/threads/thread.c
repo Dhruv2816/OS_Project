@@ -169,27 +169,28 @@ mlfqs_recalculate_load_avg (void *aux UNUSED)
   int ready_threads = 0;
   int i;
 
-  if (thread_mlfqs)
-    {
+  /* --- START FIX --- */
+  // if (thread_mlfqs)
+  //   {
       for (i = 0; i <= PRI_MAX; i++)
         {
           ready_threads += list_size (&ready_list[i]);
         }
-    }
-  else
-    {
-      ready_threads = list_size (&ready_list[0]);
-    }
+  //   }
+  // else
+  //   {
+  //     ready_threads = list_size (&ready_list[0]);
+  //   }
+  /* --- END FIX --- */
   
   if (thread_current () != idle_thread)
     ready_threads++;
 
-  //* load_avg = (59/60) * load_avg + (1/60) * ready_threads */
+  /* load_avg = (59/60) * load_avg + (1/60) * ready_threads */
   int term1 = FP_MUL_FP(FP_DIV_INT(INT_TO_FP(59), 60), load_avg);
   int term2 = FP_MUL_INT(FP_DIV_INT(INT_TO_FP(1), 60), ready_threads);
   
   load_avg = FP_ADD_FP(term1, term2);
-
 }
 
 /* Recalculates recent_cpu for a single thread T using the formula:
@@ -538,6 +539,7 @@ thread_check_preemption (void)
    be important: if the caller had disabled interrupts itself,
    it may expect that it can atomically unblock a thread and
    update other data. */
+/* threads/thread.c */
 void
 thread_unblock (struct thread *t) 
 {
@@ -560,13 +562,12 @@ thread_unblock (struct thread *t)
   t->status = THREAD_READY;
 
   /* --- THIS IS THE FIX --- */
-  /* This check must exist for *both* schedulers.
-     The helper function has the if/else logic inside it. */
-  if (!intr_context ())
-    {
-      thread_yield_if_not_highest_priority();
-    }
-  /* --- END FIX --- */
+  /* --- REMOVE THIS BLOCK --- */
+  // if (!intr_context ())
+  //  {
+  //    thread_yield_if_not_highest_priority();
+  //  }
+  /* --- END REMOVE --- */
   
   intr_set_level (old_level);
 }

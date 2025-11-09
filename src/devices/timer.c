@@ -29,7 +29,7 @@ static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
-
+static struct list sleep_list;
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
@@ -37,6 +37,7 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+  list_init (&sleep_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -89,13 +90,27 @@ timer_elapsed (int64_t then)
 void
 timer_sleep (int64_t ticks) 
 {
-  int64_t start = timer_ticks ();
+  /* If ticks is non-positive, just return (don't sleep) */
+  if (ticks <= 0)
+    {
+      return;
+    }
 
-  ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+  struct thread *cur = thread_current ();
+  enum intr_level old_level;
+
+  /* Calculate and store the exact tick to wake up */
+  cur->wake_up_tick = timer_ticks () + ticks;
+
+  old_level = intr_disable ();
+  
+  /* Add the current thread to the sleep list and block it */
+  list_push_back (&sleep_list, &cur->elem);
+  thread_block ();
+  
+  /* Re-enable interrupts after we've been woken up */
+  intr_set_level (old_level);
 }
-
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
    turned on. */
 void
@@ -171,9 +186,35 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
+
+  /* --- NEW SLEEP WAKE-UP LOGIC --- */
+  struct list_elem *e = list_begin (&sleep_list);
+
+  while (e != list_end (&sleep_list))
+    {
+      struct thread *t = list_entry (e, struct thread, elem);
+
+      /* Check if the thread's wake-up time has arrived */
+      if (ticks >= t->wake_up_tick)
+        {
+          /* Thread is ready. Remove it from sleep_list... */
+          /* We must get the next element *before* removing,
+             because thread_unblock() will modify the list. */
+          e = list_remove (e);
+          
+          /* ...and unblock it. */
+          thread_unblock (t);
+        }
+      else
+        {
+          /* This thread isn't ready, move to the next one. */
+          e = list_next (e);
+        }
+    }
+  /* --- END OF NEW LOGIC --- */
+
   thread_tick ();
 }
-
 /* Returns true if LOOPS iterations waits for more than one timer
    tick, otherwise false. */
 static bool
