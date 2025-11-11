@@ -20,7 +20,7 @@
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
-
+static void setup_arguments (struct intr_frame *if_, const char *k_cmd_line);
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
@@ -38,44 +38,175 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  /* --- PARENT-CHILD SETUP (START) --- */
+  /* Child process ko parent ka pointer dena hoga. */
+  /* Hum 'fn_copy' ko temporarily ek struct ki tarah use karenge 
+     taaki start_process ko parent ka pointer pass kar sakein. */
+     
+  struct parent_child_pass {
+      struct thread *parent;
+      const char *file_name;
+  };
+  
+  struct parent_child_pass pass_data;
+  pass_data.parent = thread_current();
+  pass_data.file_name = fn_copy;
+
+  /* thread_create ko 'pass_data' pass karo */
+  /* Note: We pass the *original* file_name to thread_create
+     for naming, but pass our 'pass_data' struct as the aux param. */
+  tid = thread_create (file_name, PRI_DEFAULT, start_process, &pass_data);
+  /* --- PARENT-CHILD SETUP (END) --- */
+  
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+  
   return tid;
 }
+static void
+setup_arguments (struct intr_frame *if_, const char *k_cmd_line) {
+    char *token, *save_ptr;
+    char *argv_tokens[128]; // Max 128 arguments
+    int argc = 0;
 
+    /* Make a temporary copy of the command line for parsing */
+    char *cmd_copy = palloc_get_page(PAL_ZERO);
+    if (cmd_copy == NULL) {
+        printf("setup_arguments: out of memory\n");
+        return; 
+    }
+    strlcpy(cmd_copy, k_cmd_line, PGSIZE);
+
+    /* Parse command line into tokens */
+    for (token = strtok_r(cmd_copy, " ", &save_ptr); token != NULL;
+         token = strtok_r(NULL, " ", &save_ptr)) {
+        argv_tokens[argc] = token;
+        argc++;
+        if (argc >= 128) break;
+    }
+
+    /* --- Build the 32-bit Stack (High Address to Low) --- */
+    
+    char *u_argv_addrs[argc]; // To store user-space addresses
+
+    /* Step 1: Push strings (right-to-left) */
+    for (int i = argc - 1; i >= 0; i--) {
+        int len = strlen(argv_tokens[i]) + 1;
+        if_->esp -= len; // Use esp
+        memcpy((void *)if_->esp, argv_tokens[i], len);
+        u_argv_addrs[i] = (char *)if_->esp;
+    }
+
+    /* Step 2: Word-align (4-byte boundary) */
+    int align_pad = (uintptr_t)if_->esp % 4;
+    if_->esp -= align_pad;
+    memset((void *)if_->esp, 0, align_pad);
+
+    /* Step 3: Null sentinel (argv[argc]) */
+    if_->esp -= 4; // 32-bit pointer
+    memset((void *)if_->esp, 0, 4);
+
+    /* Step 4: Push argv pointers (argv[argc-1] to argv[0]) */
+    for (int i = argc - 1; i >= 0; i--) {
+        if_->esp -= 4; // 32-bit pointer
+        memcpy((void *)if_->esp, &u_argv_addrs[i], 4);
+    }
+
+    /* Step 5: Push argv (pointer to argv[0]) */
+    char *argv_0_addr = (char *)if_->esp;
+    if_->esp -= 4;
+    memcpy((void *)if_->esp, &argv_0_addr, 4);
+
+    /* Step 6: Push argc */
+    if_->esp -= 4;
+    memcpy((void *)if_->esp, &argc, 4);
+
+    /* Step 7: Push fake return address */
+    if_->esp -= 4;
+    memset((void *)if_->esp, 0, 4);
+
+    /* --- Stack Finalized --- */
+    
+    palloc_free_page(cmd_copy); // Free the parsing copy
+}
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
-{
-  char *file_name = file_name_;
-  struct intr_frame if_;
-  bool success;
+start_process (void *aux) {
+    
+    /* --- PARENT-CHILD SETUP (CONTINUED) --- */
+    struct parent_child_pass {
+        struct thread *parent;
+        const char *file_name;
+    };
+    
+    struct parent_child_pass *pass_data = (struct parent_child_pass *) aux;
+    char *k_cmd_line = (char *) pass_data->file_name;
+    
+    struct thread *cur = thread_current();
+    cur->parent_thread = pass_data->parent; // Parent set karo
+    
+    /* Child ki tracking structures initialize karo */
+    sema_init(&cur->wait_sema, 0); // Parent ispar wait karega
+    cur->is_waited_on = false;
+    list_init(&cur->child_list);
+    lock_init(&cur->child_lock);
+    
+    /* Child ko parent ki list mein add karo (thread-safe) */
+    lock_acquire(&cur->parent_thread->child_lock);
+    list_push_back(&cur->parent_thread->child_list, &cur->child_elem);
+    lock_release(&cur->parent_thread->child_lock);
+    /* --- PARENT-CHILD SETUP (COMPLETE) --- */
 
-  /* Initialize interrupt frame and load executable. */
-  memset (&if_, 0, sizeof if_);
-  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
-  if_.cs = SEL_UCSEG;
-  if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
-    thread_exit ();
+    char *file_name;
+    struct intr_frame if_;
+    bool success;
 
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
-  asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
-  NOT_REACHED ();
+    /* (Baaki code waisa hi rahega) */
+    char *cmd_copy = palloc_get_page(PAL_ZERO);
+    if (cmd_copy == NULL) {
+        printf("start_process: out of memory\n");
+        palloc_free_page(k_cmd_line);
+        cur->exit_status = -1; // Set exit status before exit
+        thread_exit();
+    }
+    strlcpy(cmd_copy, k_cmd_line, PGSIZE);
+
+    char *save_ptr;
+    file_name = strtok_r(cmd_copy, " ", &save_ptr);
+
+    /* Initialize interrupt frame for 32-bit */
+    memset (&if_, 0, sizeof if_);
+    if_.cs = SEL_UCSEG;
+    if_.ds = SEL_UDSEG;
+    if_.es = SEL_UDSEG;
+    if_.ss = SEL_UDSEG;
+    if_.eflags = FLAG_IF | FLAG_MBS; 
+    
+    /* Load the executable */
+    success = load (file_name, &if_.eip, &if_.esp);
+    
+    palloc_free_page(cmd_copy); 
+
+    if (success) {
+        setup_arguments(&if_, k_cmd_line); 
+    }
+
+    /* Clean up original command line copy */
+    palloc_free_page (k_cmd_line);
+
+    /* Agar load fail hua, toh parent ko -1 signal karo */
+    if (!success) {
+        cur->exit_status = -1;
+        thread_exit ();
+    }
+
+    /* Start the user process */
+    asm volatile ("movl %0, %%esp; jmp intr_exit"
+              : : "g" (&if_) : "memory");
+    NOT_REACHED ();
 }
-
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
    exception), returns -1.  If TID is invalid or if it was not a
@@ -85,12 +216,63 @@ start_process (void *file_name_)
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int
-process_wait (tid_t child_tid UNUSED) 
+/* Helper function: Child list mein TID se struct thread dhoondhna */
+static struct thread *
+get_child_by_tid (tid_t tid)
 {
-  return -1;
+  struct thread *cur = thread_current ();
+  struct list_elem *e;
+
+  lock_acquire(&cur->child_lock);
+  for (e = list_begin (&cur->child_list); e != list_end (&cur->child_list);
+       e = list_next (e))
+    {
+      struct thread *child = list_entry (e, struct thread, child_elem);
+      if (child->tid == tid) {
+        lock_release(&cur->child_lock);
+        return child;
+      }
+    }
+  lock_release(&cur->child_lock);
+  return NULL; // Nahi mila
 }
 
+
+int
+process_wait (tid_t child_tid) 
+{
+  /* 1. Child ko dhoondho */
+  struct thread *child = get_child_by_tid (child_tid);
+
+  /* 2. Agar child nahi mila (ya child_tid invalid hai) */
+  if (child == NULL) {
+    return -1;
+  }
+  
+  /* 3. Agar child par pehle hi wait kar chuke hain */
+  if (child->is_waited_on) {
+      return -1;
+  }
+  child->is_waited_on = true;
+
+  /* 4. Child ke khatam hone ka intezaar karo */
+  /* child jab exit hoga, toh woh is semaphore ko 'up' karega */
+  sema_down (&child->wait_sema);
+
+  /* 5. Child jaag gaya, uska status return karo */
+  int child_exit_status = child->exit_status;
+  
+  /* 6. Child ko list se hatao (cleanup) */
+  /* Note: Child ka struct thread abhi free nahi kar sakte 
+     kyunki woh shayad abhi bhi 'thread_exit' mein ho sakta hai.
+     Proper memory management project ke baad ke hisson mein hota hai.
+     Abhi ke liye, bas list se remove karo. */
+  lock_acquire(&thread_current()->child_lock);
+  list_remove(&child->child_elem);
+  lock_release(&thread_current()->child_lock);
+
+  return child_exit_status;
+}
 /* Free the current process's resources. */
 void
 process_exit (void)
@@ -98,22 +280,67 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
-  /* Destroy the current process's page directory and switch back
-     to the kernel-only page directory. */
+  /* --- MODIFICATION: Print Termination Message --- */
+  /* Print the process termination message.
+     The thread name is used as it holds the full command. */
+  printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
+  /* --- END MODIFICATION --- */
+
+
+  /* --- CHILD PROCESS CLEANUP --- */
+  /* Apne sabhi children ko batao ki parent mar gaya hai 
+     (unhe "orphans" bana do) */
+  lock_acquire(&cur->child_lock);
+  struct list_elem *e = list_begin (&cur->child_list);
+  while (e != list_end (&cur->child_list))
+    {
+      struct thread *child = list_entry (e, struct thread, child_elem);
+      child->parent_thread = NULL; // Ab tum orphan ho
+      
+      /* Agar child pehle hi exit ho chuka hai, toh uski memory free karo 
+         (Advanced) - Abhi ke liye bas list clean karo */
+      
+      e = list_next(e);
+      list_remove(&child->child_elem);
+      
+      /* Agar child abhi bhi zinda hai, toh 'wait_sema' ko 'up' karo
+         taaki woh cleanup ho sake (agar woh wait kar raha tha) */
+      if (child->status != THREAD_DYING) {
+          // (Implementation optional for first pass)
+      }
+    }
+  lock_release(&cur->child_lock);
+  /* --- END CHILD CLEANUP --- */
+
+
+  /* Parent ko signal bhejo ki main khatam ho gaya */
+  if (cur->parent_thread != NULL) {
+    sema_up (&cur->wait_sema);
+  }
+
+  /* --- MODIFICATION: Close Executable File --- */
+  /* Re-allow writes and close the executable file. */
+  if (cur->executable_file != NULL)
+    {
+      file_allow_write(cur->executable_file);
+      file_close(cur->executable_file);
+    }
+  /* --- END MODIFICATION --- */
+
+  /* (Original cleanup code) */
   pd = cur->pagedir;
   if (pd != NULL) 
     {
-      /* Correct ordering here is crucial.  We must set
-         cur->pagedir to NULL before switching page directories,
-         so that a timer interrupt can't switch back to the
-         process page directory.  We must activate the base page
-         directory before destroying the process's page
-         directory, or our active page directory will be one
-         that's been freed (and cleared). */
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
+  
+  /* Note: thread_exit() ko yeh file (ya thread.c) automatically 
+     call karegi. Make sure ki thread_exit() mein bhi 
+     sema_up (&cur->wait_sema); ho agar process_exit call na ho.
+     Safest tareeka hai ki yeh sema_up yahin rakhein, aur
+     thread_exit() hamesha process_exit() ko call kare. */
 }
 
 /* Sets up the CPU for running user code in the current
@@ -190,7 +417,7 @@ struct Elf32_Phdr
 #define PT_PHDR    6            /* Program header table. */
 #define PT_STACK   0x6474e551   /* Stack segment. */
 
-/* Flags for p_flags.  See [ELF3] 2-3 and 2-4. */
+/* Flags for p_flags.  See [ELF3S] 2-3 and 2-4. */
 #define PF_X 1          /* Executable. */
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
@@ -228,6 +455,13 @@ load (const char *file_name, void (**eip) (void), void **esp)
       printf ("load: %s: open failed\n", file_name);
       goto done; 
     }
+
+  /* --- MODIFICATION: Deny Write & Store File --- */
+  /* Deny writes to the executable and store file in thread struct */
+  file_deny_write(file);
+  t->executable_file = file; // Store the file pointer in the thread
+  /* --- END MODIFICATION --- */
+
 
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -312,7 +546,19 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  
+  /* --- MODIFICATION: Cleanup on Failure --- */
+  /* If loading failed, we must re-allow writes and close the file.
+     If successful, we leave it open (stored in t->executable_file). */
+  if (!success && t->executable_file != NULL) 
+    {
+      file_allow_write(t->executable_file);
+      file_close(t->executable_file);
+      t->executable_file = NULL; // Clear pointer in thread struct
+    }
+  /* file_close (file); */ /* <-- Original line REMOVED */
+  /* --- END MODIFICATION --- */
+  
   return success;
 }
 

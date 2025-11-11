@@ -3,6 +3,8 @@
         "thread.h": "c",
         "random": "c",
         "stdlib.h": "c",
-        "functional": "c"
+        "functional": "c",
+        "vaddr.h": "c",
+        "cstdint": "c"
     }
 }

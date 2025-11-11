@@ -1,0 +1,21 @@
+{
+  "configurations": [
+    {
+      "name": "Pintos (32-bit)",
+      "includePath": [
+        "${workspaceFolder}/src/**"
+      ],
+      "defines": [
+        "PINTOS",
+        "USERPROG"
+      ],
+      "cStandard": "c11",
+      "compilerPath": "/usr/bin/gcc",
+      "compilerArgs": [
+        "-m32"
+      ],
+      "intelliSenseMode": "linux-gcc-x86"
+    }
+  ],
+  "version": 4
+}

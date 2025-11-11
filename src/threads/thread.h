@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -106,6 +107,21 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    struct file *executable_file;
+    /* --- YEH SAB ADD KARO --- */
+    
+    /* Parent process ke liye */
+    struct list child_list;       /* Is thread ke sabhi children ki list */
+    struct lock child_lock;       /* child_list ko access karne ke liye lock */
+
+    /* Child process ke liye */
+    int exit_status;              /* Iska exit status (parent ke liye) */
+    struct thread *parent_thread; /* Parent ka pointer */
+    struct list_elem child_elem;  /* Parent ki child_list mein add hone ke liye */
+    
+    struct semaphore wait_sema;    /* Parent ispar wait karega */
+    bool is_waited_on;            /* Kya parent wait kar chuka hai? */
+
 #endif
 
     /* Owned by thread.c. */
