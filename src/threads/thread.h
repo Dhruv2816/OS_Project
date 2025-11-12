@@ -121,6 +121,8 @@ struct thread
     
     struct semaphore wait_sema;    /* Parent ispar wait karega */
     bool is_waited_on;            /* Kya parent wait kar chuka hai? */
+    struct file *fd_table[128];   /* File Descriptor Table (Max 128 files) */
+    int next_fd;
 
 #endif
 

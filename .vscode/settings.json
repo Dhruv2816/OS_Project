@@ -5,6 +5,8 @@
         "stdlib.h": "c",
         "functional": "c",
         "vaddr.h": "c",
-        "cstdint": "c"
+        "cstdint": "c",
+        "filesys.h": "c",
+        "synch.h": "c"
     }
 }

@@ -158,7 +158,11 @@ start_process (void *aux) {
     lock_release(&cur->parent_thread->child_lock);
     /* --- PARENT-CHILD SETUP (COMPLETE) --- */
 
-
+    cur->next_fd = 2; // 0 (STDIN) aur 1 (STDOUT) reserved hain
+    for (int i = 0; i < 128; i++) {
+        cur->fd_table[i] = NULL;
+    }
+    
     char *file_name;
     struct intr_frame if_;
     bool success;

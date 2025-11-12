@@ -9,8 +9,11 @@
 #include "devices/shutdown.h" // For SYS_HALT
 #include "devices/input.h"    // For SYS_READ
 /* -------------------------- */
-
-
+#include "threads/synch.h"
+#include "filesys/filesys.h" 
+#include "filesys/file.h"
+#include "userprog/process.h"
+static struct lock filesys_lock;
 static void syscall_handler (struct intr_frame *);
 
 /*
@@ -131,6 +134,7 @@ void
 syscall_init (void) 
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
+  lock_init (&filesys_lock);
 }
 
 static void
@@ -198,7 +202,158 @@ syscall_handler (struct intr_frame *f)
         }
         break;
       }
+    /* * --- SYS_EXEC (Implemented) ---
+     * Reads the command line string from the stack,
+     * validates it, and starts a new process.
+     * Returns the new process's TID or -1 on failure.
+     */
+    case SYS_EXEC:
+      {
+        // 1. Validate the stack pointer for the cmd_line argument
+        validate_user_address(f->esp + 4);
+        
+        // 2. Get the const char *cmd_line argument
+        const char *cmd_line = *(const char **)(f->esp + 4);
+        
+        // 3. Validate the entire command line string
+        validate_user_string(cmd_line);
+        
+        // 4. Call process_execute
+        /* Note: process_execute is complex and can fail (e.g., OOM).
+           It will return TID_ERROR (-1) on failure. */
+        tid_t tid = process_execute(cmd_line);
+        
+        // 5. Return the new TID to the user process
+        f->eax = tid;
+        break;
+      }
 
+    /* * --- SYS_WAIT (Implemented) ---
+     * Reads the child TID (pid) from the stack
+     * and calls process_wait() to wait for it.
+     * Returns the child's exit status.
+     */
+    case SYS_WAIT:
+      {
+        // 1. Validate the stack pointer for the pid argument
+        validate_user_address(f->esp + 4);
+        
+        // 2. Get the tid_t pid argument
+        tid_t pid = *(tid_t *)(f->esp + 4);
+        
+        // 3. Call process_wait
+        /* process_wait handles all logic:
+           - Checking if pid is a valid child
+           - Checking if it's already waited on
+           - Blocking the parent
+           - Returning the exit status
+           - Returns -1 if wait fails */
+        int status = process_wait(pid);
+        
+        // 4. Return the exit status to the user process
+        f->eax = status;
+        break;
+      }
+
+    case SYS_CREATE:
+      {
+        // 1. Validate stack arguments
+        validate_user_address(f->esp + 4); // const char *file
+        validate_user_address(f->esp + 8); // unsigned initial_size
+
+        // 2. Get arguments
+        const char *file = *(const char **)(f->esp + 4);
+        unsigned initial_size = *(unsigned *)(f->esp + 8);
+
+        // 3. Validate user string
+        validate_user_string(file);
+
+        // 4. File system ko access karo (lock ke sath)
+        lock_acquire(&filesys_lock);
+        bool success = filesys_create(file, initial_size);
+        lock_release(&filesys_lock);
+
+        // 5. Result return karo
+        f->eax = success;
+        break;
+      }
+    case SYS_OPEN:
+      {
+        // 1. Validate stack argument
+        validate_user_address(f->esp + 4); // const char *file
+
+        // 2. Get argument
+        const char *file = *(const char **)(f->esp + 4);
+
+        // 3. Validate user string
+        validate_user_string(file);
+
+        struct thread *cur = thread_current();
+        
+        lock_acquire(&filesys_lock);
+        struct file *file_ptr = filesys_open(file);
+        lock_release(&filesys_lock);
+
+        if (file_ptr == NULL) {
+            // File nahi mili
+            f->eax = -1;
+        } else {
+            // File mil gayi, FD table mein add karo
+            
+            // Agla free FD dhoondo (simple linear scan)
+            // Hum 2 se start karte hain (0=STDIN, 1=STDOUT)
+            int fd = -1;
+            for (int i = 2; i < 128; i++) {
+                if (cur->fd_table[i] == NULL) {
+                    cur->fd_table[i] = file_ptr;
+                    fd = i;
+                    break;
+                }
+            }
+            
+            if (fd == -1) {
+                // FD table full hai, file ko wapas close kardo
+                file_close(file_ptr);
+            }
+            
+            f->eax = fd; // Naya FD (ya -1 agar fail)
+        }
+        break;
+      }
+
+    /* * --- SYS_CLOSE (Implemented) ---
+     * File ko close karta hai.
+     */
+    case SYS_CLOSE:
+      {
+        // 1. Validate stack argument
+        validate_user_address(f->esp + 4); // int fd
+
+        // 2. Get argument
+        int fd = *(int *)(f->esp + 4);
+        
+        // 3. FD ko validate karo
+        if (fd < 2 || fd >= 128) { // 0 aur 1 ko close nahi kar sakte
+            terminate_process(); // Ya f->eax = -1;
+            break;
+        }
+
+        struct thread *cur = thread_current();
+        struct file *file_ptr = cur->fd_table[fd];
+
+        if (file_ptr == NULL) {
+            // Invalid FD (pehle se closed ya kabhi open nahi hua)
+            terminate_process(); // Ya f->eax = -1;
+            break;
+        }
+
+        // File close karo aur FD table se hatao
+        file_close(file_ptr);
+        cur->fd_table[fd] = NULL;
+        
+        f->eax = 0; // Success (optional)
+        break;
+      }
     // ... other cases (SYS_CREATE, SYS_OPEN, etc.) ...
 
     default:
