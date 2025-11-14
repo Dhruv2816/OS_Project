@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "thread.h": "c",
+        "random": "c",
+        "stdlib.h": "c",
+        "functional": "c",
+        "vaddr.h": "c",
+        "cstdint": "c",
+        "filesys.h": "c",
+        "synch.h": "c",
+        "syscall-nr.h": "c",
+        "gdt.h": "c",
+        "palloc.h": "c"
+    }
+}
