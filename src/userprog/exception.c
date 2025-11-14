@@ -61,55 +61,36 @@ kill(struct intr_frame *f)
     }
 }
 
-/* In pintos/src/userprog/exception.c */
-
-/* In pintos/src/userprog/exception.c */
-
 void
 page_fault (struct intr_frame *f) 
 {
-  /* Read faulting linear address from CR2. */
   void *fault_addr;
   asm ("movl %%cr2, %0" : "=r" (fault_addr));
 
   bool user = (f->error_code & PF_U) != 0;
 
-  /* --- THIS IS THE CORRECT FIX --- */
   if (!user) /* Kernel-mode fault */
     {
-      /* Was this fault caused by get_user()?
-         Our get_user() assembly puts the "safe" return
-         address (the '1f' label) into f->eax *before*
-         it attempts the risky read.
-         
-         We check if f->eax looks like a kernel address.
-         If it is, we assume it's from get_user(). */
-      if (f->eax > (void *) 0xc0000000) 
+      /* Check if fault was from get_user() */
+      /* We cast f->eax to uint32_t to fix the compiler warning */
+      if ((uint32_t) f->eax > 0xc0000000) 
         {
-          /* Magic fix:
-             1. Set f->eip (instruction pointer) to the safe
-                address we stored in f->eax.
-             2. Set f->eax (return value) to -1.
-             3. Return, to resume execution at the '1f' label. */
+          /* Handle fault from get_user() */
           f->eip = (void *) f->eax;
           f->eax = -1;
           return;
         }
     }
-  /* -------------------------------------- */
-
-  /* If it was a user-mode fault, or a *real* kernel
-     fault not from get_user(), we handle as before. */
-
+  
   if (user)
     {
-      /* User-mode fault (e.g., bad jump): terminate process. */
+      /* User-mode fault */
       thread_current ()->exit_status = -1;
       thread_exit ();
     }
   else
     {
-      /* Real kernel-mode fault: panic. */
+      /* Real kernel-mode fault */
       PANIC ("Kernel page fault");
     }
 }

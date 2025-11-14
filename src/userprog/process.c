@@ -209,7 +209,7 @@ start_process (void *aux)
       pass->load_success = false;
       sema_up (&pass->load_sema);
       palloc_free_page (k_cmd_line);
-      palloc_free_page (pass);
+      // palloc_free_page (pass);
       thread_exit ();
   }
   process_activate ();
@@ -231,7 +231,7 @@ start_process (void *aux)
       pass->load_success = false;
       sema_up (&pass->load_sema);
       palloc_free_page (k_cmd_line);
-      palloc_free_page (pass);
+      // palloc_free_page (pass);
       thread_exit ();
   }
   strlcpy (cmd_copy, k_cmd_line, PGSIZE);

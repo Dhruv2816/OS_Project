@@ -8,106 +8,36 @@
 #include "devices/shutdown.h"
 #include "devices/input.h"
 #include "threads/synch.h"
-#include "filesys/filesys.h" 
+#include "filesys/filesys.h"
 #include "filesys/file.h"
 #include "userprog/process.h"
+#include <string.h> // For putbuf
 
+/* --- Global Lock --- */
 static struct lock filesys_lock;
+
+/* --- Function Prototypes for Helpers --- */
 static void syscall_handler (struct intr_frame *);
-
-/* ==================================
- * USER MEMORY VALIDATION HELPERS
- * ================================== */
+static void terminate_process (void);
 static int get_user (const uint8_t *uaddr);
-/**
- * @brief Terminates the current user process with status -1.
- */
-static void
-terminate_process (void) 
-{
-  thread_current ()->exit_status = -1;
-  thread_exit (); 
-}
-
-/**
- * @brief Validates a single user virtual address 'uaddr'.
- * If the check fails, the user process is terminated.
- */
-static void
-validate_user_address (const void *uaddr)
-{
-  if (get_user((const uint8_t*) uaddr) == -1)
-    {
-      terminate_process();
-    }
-}
-
-/**
- * @brief Validates a buffer in user memory.
- */
-static void
-validate_user_buffer (const void *buffer, unsigned size)
-{
-  const char *buf_ptr = (const char *) buffer;
-  for (unsigned i = 0; i < size; i++)
-    {
-      /* We just need to check the byte is readable.
-         We validate (buf_ptr + i) instead of *buf_ptr
-         to check the pointer itself. */
-      validate_user_address(buf_ptr + i);
-    }
-}
-/**
- * @brief Validates a null-terminated user string.
- */
-static void
-validate_user_string (const char *ustr)
-{
-  while (true)
-    {
-      int byte = get_user((const uint8_t*) ustr);
-
-      if (byte == -1) // Invalid address
-        {
-          terminate_process();
-        }
-      if (byte == '\0') // End of string
-        {
-          break;
-        }
-      ustr++; // Move to next byte
-    }
-}
+static void validate_user_address (const void *uaddr);
+static void validate_user_string (const char *ustr);
+static void validate_user_buffer (const void *buffer, unsigned size);
 
 /* ==================================
- * SYSCALL HANDLER
+ * SYSCALL INITIALIZATION
  * ================================== */
-static int
-get_user (const uint8_t *uaddr)
-{
-  /* Check that the pointer is a valid user address */
-  if (!is_user_vaddr (uaddr))
-    return -1;
 
-  /* Check if the page is mapped (optional but good) */
-  if (pagedir_get_page(thread_current()->pagedir, uaddr) == NULL)
-    return -1;
-
-  /* Use a special assembly trick to read the byte.
-     If the read causes a page fault, the CPU will jump
-     to the '1f' (local label 1 forward) and set 'result'
-     to -1, instead of panicking the kernel. */
-  int result;
-  asm ("movl $1f, %0; movzbl %1, %0; 1:"
-       : "=&a" (result) : "m" (*uaddr));
-  return result;
-}
 void
 syscall_init (void) 
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
   lock_init (&filesys_lock);
 }
+
+/* ==================================
+ * SYSCALL HANDLER
+ * ================================== */
 
 static void
 syscall_handler (struct intr_frame *f) 
@@ -131,48 +61,7 @@ syscall_handler (struct intr_frame *f)
         thread_exit();
         break;
       }
-      
-    case SYS_WRITE:
-      {
-        // 1. Validate stack arguments
-        validate_user_address(f->esp + 4);  // int fd
-        validate_user_address(f->esp + 8);  // const void *buffer
-        validate_user_address(f->esp + 12); // unsigned size
 
-        // 2. Get arguments
-        int fd = *(int *)(f->esp + 4);
-        const void *buffer = *(const void **)(f->esp + 8);
-        unsigned size = *(unsigned *)(f->esp + 12);
-        
-        // 3. Validate the user buffer
-        validate_user_buffer(buffer, size);
-
-        int bytes_written = -1; // Default to error
-
-        if (fd == 1) // STDOUT_FILENO
-          {
-            putbuf(buffer, size);
-            bytes_written = size;
-          }
-        else if (fd > 1 && fd < 128) // Regular file
-          {
-            struct thread *cur = thread_current();
-            struct file *file_ptr = cur->fd_table[fd];
-
-            if (file_ptr == NULL) {
-                bytes_written = -1; // Bad FD
-            } else {
-                // Perform the write
-                lock_acquire(&filesys_lock);
-                bytes_written = file_write(file_ptr, buffer, size);
-                lock_release(&filesys_lock);
-            }
-          }
-
-        f->eax = bytes_written; // Return number of bytes written
-        break;
-      }
-      
     case SYS_EXEC:
       {
         validate_user_address(f->esp + 4);
@@ -205,6 +94,20 @@ syscall_handler (struct intr_frame *f)
 
         lock_acquire(&filesys_lock);
         bool success = filesys_create(file, initial_size);
+        lock_release(&filesys_lock);
+
+        f->eax = success;
+        break;
+      }
+
+    case SYS_REMOVE:
+      {
+        validate_user_address(f->esp + 4); // const char *file
+        const char *file = *(const char **)(f->esp + 4);
+        validate_user_string(file);
+
+        lock_acquire(&filesys_lock);
+        bool success = filesys_remove(file);
         lock_release(&filesys_lock);
 
         f->eax = success;
@@ -245,6 +148,154 @@ syscall_handler (struct intr_frame *f)
         break;
       }
 
+    case SYS_FILESIZE:
+      {
+        validate_user_address(f->esp + 4); // int fd
+        int fd = *(int *)(f->esp + 4);
+        
+        int size = -1; 
+
+        if (fd > 1 && fd < 128) 
+          {
+            struct thread *cur = thread_current();
+            struct file *file_ptr = cur->fd_table[fd];
+            
+            if (file_ptr != NULL)
+              {
+                lock_acquire(&filesys_lock);
+                size = file_length(file_ptr);
+                lock_release(&filesys_lock);
+              }
+          }
+        
+        f->eax = size;
+        break;
+      }
+
+    case SYS_READ:
+      {
+        validate_user_address(f->esp + 4);  // int fd
+        validate_user_address(f->esp + 8);  // void *buffer
+        validate_user_address(f->esp + 12); // unsigned size
+
+        int fd = *(int *)(f->esp + 4);
+        void *buffer = *(void **)(f->esp + 8);
+        unsigned size = *(unsigned *)(f->esp + 12);
+
+        validate_user_buffer(buffer, size);
+
+        int bytes_read = -1; 
+
+        if (fd == 0) // STDIN_FILENO
+          {
+            uint8_t *buf_ptr = (uint8_t *) buffer;
+            for (unsigned i = 0; i < size; i++) {
+                buf_ptr[i] = input_getc();
+            }
+            bytes_read = size;
+          }
+        else if (fd > 1 && fd < 128) // Regular file
+          {
+            struct thread *cur = thread_current();
+            struct file *file_ptr = cur->fd_table[fd];
+            
+            if (file_ptr == NULL) {
+                bytes_read = -1; // Bad FD
+            } else {
+                lock_acquire(&filesys_lock);
+                bytes_read = file_read(file_ptr, buffer, size);
+                lock_release(&filesys_lock);
+            }
+          }
+        
+        f->eax = bytes_read;
+        break;
+      }
+      
+    case SYS_WRITE:
+      {
+        validate_user_address(f->esp + 4);  // int fd
+        validate_user_address(f->esp + 8);  // const void *buffer
+        validate_user_address(f->esp + 12); // unsigned size
+
+        int fd = *(int *)(f->esp + 4);
+        const void *buffer = *(const void **)(f->esp + 8);
+        unsigned size = *(unsigned *)(f->esp + 12);
+        
+        validate_user_buffer(buffer, size);
+
+        int bytes_written = -1; 
+
+        if (fd == 1) // STDOUT_FILENO
+          {
+            putbuf(buffer, size);
+            bytes_written = size;
+          }
+        else if (fd > 1 && fd < 128) // Regular file
+          {
+            struct thread *cur = thread_current();
+            struct file *file_ptr = cur->fd_table[fd];
+
+            if (file_ptr == NULL) {
+                bytes_written = -1; // Bad FD
+            } else {
+                lock_acquire(&filesys_lock);
+                bytes_written = file_write(file_ptr, buffer, size);
+                lock_release(&filesys_lock);
+            }
+          }
+
+        f->eax = bytes_written; 
+        break;
+      }
+
+    case SYS_SEEK:
+      {
+        validate_user_address(f->esp + 4); // int fd
+        validate_user_address(f->esp + 8); // unsigned position
+
+        int fd = *(int *)(f->esp + 4);
+        unsigned position = *(unsigned *)(f->esp + 8);
+
+        if (fd > 1 && fd < 128)
+          {
+            struct thread *cur = thread_current();
+            struct file *file_ptr = cur->fd_table[fd];
+            
+            if (file_ptr != NULL)
+              {
+                lock_acquire(&filesys_lock);
+                file_seek(file_ptr, position);
+                lock_release(&filesys_lock);
+              }
+          }
+        
+        break;
+      }
+
+    case SYS_TELL:
+      {
+        validate_user_address(f->esp + 4); // int fd
+        int fd = *(int *)(f->esp + 4);
+        unsigned position = -1; 
+
+        if (fd > 1 && fd < 128)
+          {
+            struct thread *cur = thread_current();
+            struct file *file_ptr = cur->fd_table[fd];
+            
+            if (file_ptr != NULL)
+              {
+                lock_acquire(&filesys_lock);
+                position = file_tell(file_ptr);
+                lock_release(&filesys_lock);
+              }
+          }
+        
+        f->eax = position;
+        break;
+      }
+
     case SYS_CLOSE:
       {
         validate_user_address(f->esp + 4); // int fd
@@ -268,164 +319,100 @@ syscall_handler (struct intr_frame *f)
         break;
       }
 
-    /* --- STUBS FOR OTHER SYSCALLS --- */
-    case SYS_READ:
-      {
-        // 1. Validate stack arguments
-        validate_user_address(f->esp + 4);  // int fd
-        validate_user_address(f->esp + 8);  // void *buffer
-        validate_user_address(f->esp + 12); // unsigned size
-
-        // 2. Get arguments
-        int fd = *(int *)(f->esp + 4);
-        void *buffer = *(void **)(f->esp + 8);
-        unsigned size = *(unsigned *)(f->esp + 12);
-
-        // 3. Validate the user buffer
-        validate_user_buffer(buffer, size);
-
-        int bytes_read = -1; // Default to error
-
-        if (fd == 0) // STDIN_FILENO
-          {
-            // Read from keyboard
-            uint8_t *buf_ptr = (uint8_t *) buffer;
-            for (unsigned i = 0; i < size; i++) {
-                buf_ptr[i] = input_getc();
-            }
-            bytes_read = size;
-          }
-        else if (fd > 1 && fd < 128) // Regular file
-          {
-            struct thread *cur = thread_current();
-            struct file *file_ptr = cur->fd_table[fd];
-            
-            if (file_ptr == NULL) {
-                bytes_read = -1; // Bad FD
-            } else {
-                // Perform the read
-                lock_acquire(&filesys_lock);
-                bytes_read = file_read(file_ptr, buffer, size);
-                lock_release(&filesys_lock);
-            }
-          }
-        
-        f->eax = bytes_read; // Return number of bytes read
-        break;
-      }
-    case SYS_FILESIZE:
-  {
-    // 1. Validate stack argument
-    validate_user_address(f->esp + 4); // int fd
-    int fd = *(int *)(f->esp + 4);
-
-    int size = -1; // Default to error
-
-    if (fd > 1 && fd < 128) // Regular file
-      {
-        struct thread *cur = thread_current();
-        struct file *file_ptr = cur->fd_table[fd];
-
-        if (file_ptr != NULL)
-          {
-            lock_acquire(&filesys_lock);
-            size = file_length(file_ptr);
-            lock_release(&filesys_lock);
-          }
-      }
-
-    f->eax = size;
-    break;
-  }
-case SYS_REMOVE:
-      {
-        // 1. Validate stack argument
-        validate_user_address(f->esp + 4); // const char *file
-        
-        // 2. Get argument
-        const char *file = *(const char **)(f->esp + 4);
-
-        // 3. Validate user string
-        validate_user_string(file);
-
-        // 4. Remove the file
-        lock_acquire(&filesys_lock);
-        bool success = filesys_remove(file);
-        lock_release(&filesys_lock);
-
-        // 5. Return success status
-        f->eax = success;
-        break;
-      }
-
-    /* * --- SYS_SEEK (Implemented) ---
-     * Changes the next byte to be read/written in an open file.
-     */
-    case SYS_SEEK:
-      {
-        // 1. Validate stack arguments
-        validate_user_address(f->esp + 4); // int fd
-        validate_user_address(f->esp + 8); // unsigned position
-
-        // 2. Get arguments
-        int fd = *(int *)(f->esp + 4);
-        unsigned position = *(unsigned *)(f->esp + 8);
-
-        // 3. Find the file in the FD table
-        if (fd > 1 && fd < 128) // Check for valid fd
-          {
-            struct thread *cur = thread_current();
-            struct file *file_ptr = cur->fd_table[fd];
-            
-            if (file_ptr != NULL)
-              {
-                // 4. Seek the file
-                lock_acquire(&filesys_lock);
-                file_seek(file_ptr, position);
-                lock_release(&filesys_lock);
-              }
-          }
-        
-        // This syscall does not return a value.
-        break;
-      }
-
-    /* * --- SYS_TELL (Implemented) ---
-     * Returns the position of the next byte to be read/written.
-     */
-    case SYS_TELL:
-      {
-        // 1. Validate stack argument
-        validate_user_address(f->esp + 4); // int fd
-        
-        // 2. Get argument
-        int fd = *(int *)(f->esp + 4);
-
-        unsigned position = -1; // Default to error
-
-        // 3. Find the file in the FD table
-        if (fd > 1 && fd < 128) // Check for valid fd
-          {
-            struct thread *cur = thread_current();
-            struct file *file_ptr = cur->fd_table[fd];
-            
-            if (file_ptr != NULL)
-              {
-                // 4. Get the file's current position
-                lock_acquire(&filesys_lock);
-                position = file_tell(file_ptr);
-                lock_release(&filesys_lock);
-              }
-          }
-        
-        // 5. Return the position
-        f->eax = position;
-        break;
-      }
-
     default:
       printf ("Unknown system call: %d\n", syscall_num);
       terminate_process();
       break;
+    }
+}
+
+/* ==================================
+ * USER MEMORY VALIDATION HELPERS
+ * ================================== */
+
+/**
+ * @brief Terminates the current user process with status -1.
+ */
+static void
+terminate_process (void) 
+{
+  thread_current ()->exit_status = -1;
+  thread_exit (); 
+}
+
+/**
+ * @brief Safely reads a byte from user memory.
+ * Returns the byte value or -1 on failure.
+ */
+static int
+get_user (const uint8_t *uaddr)
+{
+  /* Check if the pointer is a valid user address */
+  if (!is_user_vaddr (uaddr))
+    return -1;
+  
+  /* --- THIS IS THE FIX --- */
+  /* Check if the thread's page directory is valid */
+  struct thread *cur = thread_current();
+  if (cur->pagedir == NULL)
+    return -1;
+  /* ----------------------- */
+
+  /* Check if the page is mapped */
+  if (pagedir_get_page(cur->pagedir, uaddr) == NULL)
+    return -1;
+
+  /* All checks passed, try to read the byte */
+  int result;
+  asm volatile ("movl $1f, %%eax; movzbl %1, %0; 1:"
+               : "=&a" (result) : "m" (*uaddr));
+  return result;
+}
+
+/**
+ * @brief Validates a single user virtual address.
+ * If invalid, terminates the process.
+ */
+static void
+validate_user_address (const void *uaddr)
+{
+  if (get_user((const uint8_t*) uaddr) == -1)
+    {
+      terminate_process();
+    }
+}
+
+/**
+ * @brief Validates a user-provided string.
+ */
+static void
+validate_user_string (const char *ustr)
+{
+  while (true)
+    {
+      int byte = get_user((const uint8_t*) ustr);
+      
+      if (byte == -1) // Invalid address
+        {
+          terminate_process();
+        }
+      if (byte == '\0') // End of string
+        {
+          break;
+        }
+      ustr++; // Move to next byte
+    }
+}
+
+/**
+ * @brief Validates a user-provided buffer.
+ */
+static void
+validate_user_buffer (const void *buffer, unsigned size)
+{
+  const char *buf_ptr = (const char *) buffer;
+  for (unsigned i = 0; i < size; i++)
+    {
+      validate_user_address(buf_ptr + i);
     }
 }
